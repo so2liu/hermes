@@ -39,6 +39,8 @@ jobs:
     needs: build-and-push
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
       - name: Validate required secrets
         run: |
           missing=""
@@ -50,7 +52,17 @@ jobs:
             exit 1
           fi
 
-      - name: Deploy to server
+      - name: Copy docker-compose to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          source: "cloud/docker-compose.yml"
+          target: "~/hermes-cloud"
+          overwrite: true
+
+      - name: Deploy via docker compose
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.DEPLOY_HOST }}
@@ -58,24 +70,21 @@ jobs:
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           script: |
             set -e
-            IMAGE="${{ env.IMAGE }}:${{ github.sha }}"
+            cd ~/hermes-cloud/cloud
 
-            # Pull new image
-            docker pull "$IMAGE"
+            # Write .env for docker compose
+            cat > .env <<EOF
+            HERMES_AUTH_TOKEN=${{ secrets.HERMES_AUTH_TOKEN }}
+            OPENROUTER_API_KEY=${{ secrets.OPENROUTER_API_KEY }}
+            EOF
+            sed -i 's/^[[:space:]]*//' .env
 
-            # Stop old containers (including legacy docker compose name)
-            docker rm -f hermes-cloud cloud-hermes-cloud-1 2>/dev/null || true
+            # Pull new image and restart
+            docker compose pull
+            docker compose up -d
 
-            # Start new container
-            docker run -d \
-              --name hermes-cloud \
-              --restart unless-stopped \
-              -p 8765:8765 \
-              -v hermes-data:/app/.hermes \
-              -e PORT=8765 \
-              -e HERMES_AUTH_TOKEN="${{ secrets.HERMES_AUTH_TOKEN }}" \
-              -e OPENROUTER_API_KEY="${{ secrets.OPENROUTER_API_KEY }}" \
-              "$IMAGE"
+            # Clean up legacy containers
+            docker rm -f cloud-hermes-cloud-1 2>/dev/null || true
 
             # Verify health
             sleep 3
@@ -83,8 +92,6 @@ jobs:
               echo "Hermes Cloud Server is running"
             else
               echo "Health check failed"
-              docker logs hermes-cloud --tail=50
+              docker compose logs --tail=50
               exit 1
             fi
-        env:
-          IMAGE: ghcr.io/so2liu/hermes-cloud

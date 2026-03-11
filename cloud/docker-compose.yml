@@ -1,0 +1,17 @@
+services:
+  hermes-cloud:
+    image: ghcr.io/so2liu/hermes-cloud:latest
+    container_name: hermes-cloud
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+    environment:
+      - PORT=8765
+      - HERMES_AUTH_TOKEN=${HERMES_AUTH_TOKEN}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+    volumes:
+      - hermes-data:/app/.hermes
+
+volumes:
+  hermes-data:
