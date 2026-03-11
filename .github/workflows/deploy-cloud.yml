@@ -79,12 +79,12 @@ jobs:
             EOF
             sed -i 's/^[[:space:]]*//' .env
 
+            # Clean up any conflicting containers
+            docker rm -f hermes-cloud cloud-hermes-cloud-1 2>/dev/null || true
+
             # Pull new image and restart
             docker compose pull
             docker compose up -d
-
-            # Clean up legacy containers
-            docker rm -f cloud-hermes-cloud-1 2>/dev/null || true
 
             # Verify health
             sleep 3
