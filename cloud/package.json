@@ -1,0 +1,17 @@
+{
+  "name": "cloud",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@mariozechner/pi-ai": "file:/Users/yangliu35/github/pi-mono/packages/ai",
+    "@mariozechner/pi-coding-agent": "file:/Users/yangliu35/github/pi-mono/packages/coding-agent",
+    "hono": "^4.12.7"
+  }
+}
