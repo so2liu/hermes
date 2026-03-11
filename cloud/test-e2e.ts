@@ -1,12 +1,15 @@
 /**
  * End-to-end test: starts the cloud server with real LLM,
- * connects as desktop client, sends a message that should trigger local_bash,
+ * connects as desktop client (registers desktop skill),
+ * sends a message that should trigger desktop_exec,
  * executes locally, and verifies the full round trip.
+ *
+ * REQUIRES: OPENROUTER_API_KEY or ANTHROPIC_API_KEY env var.
  */
 
 import { spawn } from "node:child_process";
 
-const PORT = 28765; // Use a different port to avoid conflicts
+const PORT = 28765;
 
 // --- Start server as subprocess ---
 console.log("[e2e] Starting cloud server on port", PORT);
@@ -44,6 +47,22 @@ await new Promise<void>((resolve, reject) => {
 
 console.log("[e2e] Server ready, connecting desktop client...");
 
+// --- Desktop SKILL.md ---
+const DESKTOP_SKILL_MD = `---
+name: desktop
+description: "操作用户本地电脑。访问本地文件、使用本地应用、操作浏览器登录状态等。"
+---
+
+# Desktop 本地执行环境
+
+通过 \`desktop_exec\` 工具在用户本地电脑上执行 bash 命令。
+
+## 使用方法
+\`\`\`
+desktop_exec({ command: "ls ~/Desktop" })
+\`\`\`
+`;
+
 // --- Connect as desktop client ---
 const ws = new WebSocket(`ws://localhost:${PORT}`);
 const events: any[] = [];
@@ -51,6 +70,15 @@ let testDone = false;
 
 ws.addEventListener("open", () => {
   console.log("[e2e] Desktop client connected");
+
+  // Register desktop skill
+  ws.send(
+    JSON.stringify({
+      type: "register_skill",
+      skill: { name: "desktop", skillMd: DESKTOP_SKILL_MD },
+    }),
+  );
+  console.log("[e2e] Registered desktop skill");
 });
 
 ws.addEventListener("message", async (event) => {
@@ -60,33 +88,44 @@ ws.addEventListener("message", async (event) => {
     const ae = msg.event;
     events.push(ae);
 
-    // Log ALL event types for debugging
     if (ae.type !== "message_update") {
-      console.log(`\n[e2e] Event: ${ae.type}`, JSON.stringify(ae).slice(0, 200));
+      console.log(
+        `\n[e2e] Event: ${ae.type}`,
+        JSON.stringify(ae).slice(0, 200),
+      );
     }
 
-    // Print text deltas
-    if (ae.type === "message_update" && ae.assistantMessageEvent?.type === "text_delta") {
+    if (
+      ae.type === "message_update" &&
+      ae.assistantMessageEvent?.type === "text_delta"
+    ) {
       process.stdout.write(ae.assistantMessageEvent.delta);
     }
-    // Log non-text message_update events
-    if (ae.type === "message_update" && ae.assistantMessageEvent?.type !== "text_delta") {
-      console.log(`\n[e2e] message_update subtype: ${ae.assistantMessageEvent?.type}`);
+    if (
+      ae.type === "message_update" &&
+      ae.assistantMessageEvent?.type !== "text_delta"
+    ) {
+      console.log(
+        `\n[e2e] message_update subtype: ${ae.assistantMessageEvent?.type}`,
+      );
     }
 
-    // Print tool calls
     if (ae.type === "tool_execution_start") {
-      console.log(`\n[e2e] Tool call: ${ae.toolName ?? ae.tool?.name ?? "unknown"}`);
+      console.log(
+        `\n[e2e] Tool call: ${ae.toolName ?? ae.tool?.name ?? "unknown"}`,
+      );
     }
   }
 
-  if (msg.type === "local_tool_request") {
-    console.log(`\n[e2e] LOCAL TOOL REQUEST: ${msg.params.command}`);
+  if (msg.type === "skill_exec_request") {
+    console.log(`\n[e2e] SKILL EXEC REQUEST: ${msg.command}`);
 
-    // Execute locally
-    const result = await new Promise<{ result: string; exitCode: number | null }>((resolve) => {
+    const result = await new Promise<{
+      result: string;
+      exitCode: number | null;
+    }>((resolve) => {
       const chunks: Buffer[] = [];
-      const child = spawn("bash", ["-c", msg.params.command], {
+      const child = spawn("bash", ["-c", msg.command], {
         cwd: process.env.HOME,
         stdio: ["ignore", "pipe", "pipe"],
       });
@@ -97,39 +136,50 @@ ws.addEventListener("message", async (event) => {
       });
     });
 
-    console.log(`[e2e] Local execution result: "${result.result.trim()}" (exit=${result.exitCode})`);
+    console.log(
+      `[e2e] Local execution result: "${result.result.trim()}" (exit=${result.exitCode})`,
+    );
 
-    ws.send(JSON.stringify({
-      type: "local_tool_response",
-      id: msg.id,
-      result: result.result,
-      exitCode: result.exitCode,
-    }));
+    ws.send(
+      JSON.stringify({
+        type: "skill_exec_response",
+        id: msg.id,
+        result: result.result,
+        exitCode: result.exitCode,
+      }),
+    );
   }
 
-  if (msg.type === "status" && msg.agent === "idle" && events.length > 0 && !testDone) {
+  if (
+    msg.type === "status" &&
+    msg.agent === "idle" &&
+    events.length > 0 &&
+    !testDone
+  ) {
     testDone = true;
     console.log("\n\n[e2e] === Test Complete ===");
 
-    // Analyze results
     const toolCalls = events.filter((e) => e.type === "tool_execution_start");
-    const localCalls = toolCalls.filter((e) => (e.toolName ?? e.tool?.name) === "local_bash");
-    const cloudCalls = toolCalls.filter((e) => (e.toolName ?? e.tool?.name) === "cloud_bash");
+    const desktopCalls = toolCalls.filter(
+      (e) => (e.toolName ?? e.tool?.name) === "desktop_exec",
+    );
+    const cloudCalls = toolCalls.filter(
+      (e) => (e.toolName ?? e.tool?.name) === "cloud_bash",
+    );
 
     console.log(`[e2e] Total tool calls: ${toolCalls.length}`);
-    console.log(`[e2e] - local_bash: ${localCalls.length}`);
+    console.log(`[e2e] - desktop_exec: ${desktopCalls.length}`);
     console.log(`[e2e] - cloud_bash: ${cloudCalls.length}`);
 
-    if (localCalls.length > 0) {
-      console.log("[e2e] ✅ PASS: Agent used local_bash as expected");
+    if (desktopCalls.length > 0) {
+      console.log("[e2e] ✅ PASS: Agent used desktop_exec as expected");
     } else {
-      console.log("[e2e] ❌ FAIL: Agent did not use local_bash");
+      console.log("[e2e] ❌ FAIL: Agent did not use desktop_exec");
     }
 
-    // Cleanup
     ws.close();
     serverProc.kill("SIGTERM");
-    setTimeout(() => process.exit(localCalls.length > 0 ? 0 : 1), 500);
+    setTimeout(() => process.exit(desktopCalls.length > 0 ? 0 : 1), 500);
   }
 
   if (msg.type === "error") {
@@ -143,13 +193,16 @@ ws.addEventListener("error", (err) => {
   process.exit(1);
 });
 
-// Wait for connection, then send test message
-await new Promise((r) => setTimeout(r, 1000));
+// Wait for connection + registration, then send test message
+await new Promise((r) => setTimeout(r, 2000));
 console.log('[e2e] Sending test message: "list files on my Desktop"');
-ws.send(JSON.stringify({
-  type: "message",
-  content: "List the files on my Desktop directory. Use local_bash since you need to access my local machine.",
-}));
+ws.send(
+  JSON.stringify({
+    type: "message",
+    content:
+      "List the files on my Desktop directory. Use desktop_exec since you need to access my local machine.",
+  }),
+);
 
 // Timeout after 60s
 setTimeout(() => {

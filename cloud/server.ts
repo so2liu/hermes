@@ -11,122 +11,106 @@ import {
   ModelRegistry,
 } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
+import { join } from "node:path";
+import { SkillRegistry } from "./skill-registry";
 
 // --- WebSocket protocol types ---
 
 type ClientMessage =
   | { type: "message"; content: string }
-  | { type: "local_tool_response"; id: string; result: string; exitCode: number | null };
+  | { type: "register_skill"; skill: { name: string; skillMd: string } }
+  | {
+      type: "skill_exec_response";
+      id: string;
+      result: string;
+      exitCode: number | null;
+    };
 
 type ServerMessage =
   | { type: "agent_event"; event: Record<string, unknown> }
   | {
-      type: "local_tool_request";
+      type: "skill_exec_request";
       id: string;
-      tool: string;
-      params: Record<string, unknown>;
+      sessionId: string;
+      skillName: string;
+      command: string;
+      timeout: number;
     }
   | { type: "error"; message: string }
-  | { type: "status"; agent: "idle" | "busy"; localToolsAvailable: boolean };
+  | { type: "status"; agent: "idle" | "busy"; skills: string[] };
 
-// --- Local tool callback management ---
-
-const pendingLocalCalls = new Map<
-  string,
-  {
-    resolve: (value: { result: string; exitCode: number | null }) => void;
-    reject: (reason: Error) => void;
-  }
->();
-
-let desktopWs: any = null;
-let desktopConnected = false;
-
-function sendToDesktop(msg: ServerMessage): boolean {
-  if (!desktopConnected || !desktopWs) return false;
-  desktopWs.send(JSON.stringify(msg));
-  return true;
-}
-
-// --- Tool definitions ---
+// --- Static tools ---
 
 const CWD = process.cwd();
-
-const bashSchema = Type.Object({
-  command: Type.String({ description: "Shell command to execute" }),
-  timeout: Type.Optional(Type.Number({ description: "Timeout in seconds" })),
-});
-
 const baseBashTool = createBashTool(CWD);
 
 const cloudBashDef: ToolDefinition = {
   name: "cloud_bash",
   label: "Cloud Bash",
   description:
-    "Execute a shell command in the CLOUD sandbox environment. Use this when you need to: " +
-    "run untrusted or generated code safely, " +
-    "install packages or dependencies, " +
-    "execute long-running computations, " +
-    "or perform operations that don't require the user's local files.",
-  parameters: bashSchema,
-  execute: async (toolCallId, params, signal, onUpdate, _ctx) => {
+    "Execute a shell command in the CLOUD sandbox environment. Use for code execution, package installation, or untrusted operations.",
+  parameters: Type.Object({
+    command: Type.String({ description: "Shell command to execute" }),
+    timeout: Type.Optional(
+      Type.Number({ description: "Timeout in seconds" }),
+    ),
+  }),
+  execute: async (toolCallId, params, signal, onUpdate) => {
     return baseBashTool.execute(toolCallId, params, signal, onUpdate);
   },
 };
 
-const localBashDef: ToolDefinition = {
-  name: "local_bash",
-  label: "Local Bash",
-  description:
-    "Execute a shell command on the user's LOCAL machine. Use this when you need to: " +
-    "access user's local files (~/Desktop, ~/Documents, etc.), " +
-    "use user's installed applications, " +
-    "interact with user's browser login state, " +
-    "or perform operations that require the user's local environment.",
-  parameters: bashSchema,
-  execute: async (toolCallId, params, signal, _onUpdate, _ctx) => {
-    const id = crypto.randomUUID();
-    const { command, timeout: userTimeout } = params as { command: string; timeout?: number };
+// --- Skill Registry + reload scheduling ---
 
-    const sent = sendToDesktop({
-      type: "local_tool_request",
-      id,
-      tool: "local_bash",
-      params: { command, timeout: userTimeout },
-    });
+const SKILLS_DIR = join(CWD, ".hermes", "skills");
+let reloadPending = false;
+let reloadInFlight = false;
+let agentBusy = false;
+let session: Awaited<ReturnType<typeof createAgentSession>>["session"];
 
-    if (!sent) {
-      return {
-        result: "Error: Desktop client is not connected. Cannot execute local commands. Use cloud_bash instead.",
-        details: {},
-      };
+async function doReload() {
+  if (reloadInFlight) {
+    reloadPending = true;
+    return;
+  }
+  reloadInFlight = true;
+  try {
+    await session.reload();
+  } finally {
+    reloadInFlight = false;
+    if (reloadPending) {
+      reloadPending = false;
+      doReload();
     }
+  }
+}
 
-    const response = await new Promise<{ result: string; exitCode: number | null }>(
-      (resolve, reject) => {
-        pendingLocalCalls.set(id, { resolve, reject });
+// TODO: MVP 硬编码单 session，多用户时需为每个用户创建独立 sessionId
+const SESSION_ID = crypto.randomUUID();
 
-        const timeout = userTimeout ?? 120;
-        setTimeout(() => {
-          if (pendingLocalCalls.has(id)) {
-            pendingLocalCalls.delete(id);
-            reject(new Error(`Local tool execution timed out after ${timeout}s`));
-          }
-        }, timeout * 1000);
-
-        signal?.addEventListener("abort", () => {
-          pendingLocalCalls.delete(id);
-          reject(new Error("Aborted"));
-        });
-      }
-    );
-
-    return {
-      result: `Exit code: ${response.exitCode}\n${response.result}`,
-      details: {},
-    };
+const registry = new SkillRegistry({
+  skillsDir: SKILLS_DIR,
+  sessionId: SESSION_ID,
+  staticTools: [cloudBashDef],
+  onSkillChange: () => {
+    if (!agentBusy && session) {
+      doReload();
+    } else {
+      reloadPending = true;
+    }
   },
-};
+});
+
+// --- Client tracking (broadcast to all connected clients) ---
+
+const clients = new Set<{ send: (data: string) => void }>();
+
+function broadcast(msg: ServerMessage) {
+  const data = JSON.stringify(msg);
+  for (const ws of clients) {
+    ws.send(data);
+  }
+}
 
 // --- Agent session setup ---
 
@@ -174,29 +158,32 @@ async function createHermesAgent() {
       errors: [],
       runtime: createExtensionRuntime(),
     }),
-    getSkills: () => ({ skills: [], diagnostics: [] }),
+    getSkills: () => ({ skills: registry.skills, diagnostics: [] }),
     getPrompts: () => ({ prompts: [], diagnostics: [] }),
     getThemes: () => ({ themes: [], diagnostics: [] }),
     getAgentsFiles: () => ({ agentsFiles: [] }),
-    getSystemPrompt: () =>
-      `You are Hermes, an AI assistant that can execute tasks both locally on the user's machine and in a cloud sandbox.
+    getSystemPrompt: () => {
+      const skillList = registry.skills
+        .map((s) => `- ${s.name}: ${s.description}`)
+        .join("\n");
+      const skillSection = skillList
+        ? `\n\nAvailable Skills:\n${skillList}\n\nTo use a skill, first read its SKILL.md file at .hermes/skills/{name}/SKILL.md to learn the available commands, then use the corresponding {name}_exec tool.`
+        : "";
+      return `You are Hermes, an AI assistant that can execute tasks in a cloud sandbox and dynamically registered environments.
 
-You have two bash tools available:
+You have the following tools:
 - cloud_bash: Runs in a cloud sandbox. Use for code execution, package installation, or untrusted operations.
-- local_bash: Runs on the user's local machine. Use for accessing local files, using local apps, or anything needing the user's environment.
+${skillSection}
 
-Choose the right tool based on the task. If local_bash returns an error saying the desktop client is not connected, switch to cloud_bash.
-
-Current cloud working directory: ${CWD}`,
+Current cloud working directory: ${CWD}`;
+    },
     getAppendSystemPrompt: () => [],
     getPathMetadata: () => new Map(),
     extendResources: () => {},
     reload: async () => {},
   };
 
-  // customTools registers tools as proper function-calling tools for the LLM.
-  // tools: [] disables built-in tools (read, bash, edit, write).
-  const { session } = await createAgentSession({
+  const result = await createAgentSession({
     cwd: CWD,
     agentDir: "/tmp/hermes-agent",
     model,
@@ -204,21 +191,20 @@ Current cloud working directory: ${CWD}`,
     authStorage,
     modelRegistry,
     resourceLoader,
-    tools: [],
-    customTools: [cloudBashDef, localBashDef],
+    tools: ["read"],
+    customTools: registry.tools,
     sessionManager: SessionManager.inMemory(),
     settingsManager,
   });
 
-  return { session };
+  return result.session;
 }
 
 // --- WebSocket server ---
 
 const PORT = parseInt(process.env.PORT ?? "8765");
 
-const { session } = await createHermesAgent();
-let agentBusy = false;
+session = await createHermesAgent();
 
 console.log(`Hermes Cloud server starting on port ${PORT}...`);
 
@@ -230,26 +216,28 @@ Bun.serve({
   },
   websocket: {
     open(ws) {
-      console.log("Desktop client connected");
-      desktopWs = ws;
-      desktopConnected = true;
-
-      sendToDesktop({
-        type: "status",
-        agent: agentBusy ? "busy" : "idle",
-        localToolsAvailable: true,
-      });
+      console.log("Client connected");
+      clients.add(ws);
+      ws.send(
+        JSON.stringify({
+          type: "status",
+          agent: agentBusy ? "busy" : "idle",
+          skills: registry.getSkillNames(),
+        } satisfies ServerMessage),
+      );
     },
 
-    close(ws) {
-      if (ws !== desktopWs) return; // Ignore stale socket close
-      console.log("Desktop client disconnected");
-      desktopConnected = false;
-      desktopWs = null;
-
-      for (const [id, { reject }] of pendingLocalCalls) {
-        reject(new Error("Desktop client disconnected"));
-        pendingLocalCalls.delete(id);
+    async close(ws) {
+      console.log("Client disconnected");
+      clients.delete(ws);
+      const hadSkills = registry.getSkillNames().length > 0;
+      await registry.unregisterByWs(ws);
+      if (hadSkills) {
+        broadcast({
+          type: "status",
+          agent: agentBusy ? "busy" : "idle",
+          skills: registry.getSkillNames(),
+        });
       }
     },
 
@@ -257,55 +245,91 @@ Bun.serve({
       let msg: ClientMessage;
       try {
         msg = JSON.parse(
-          typeof raw === "string" ? raw : new TextDecoder().decode(raw)
+          typeof raw === "string" ? raw : new TextDecoder().decode(raw),
         );
       } catch {
         console.error("[server] Invalid JSON from client");
         return;
       }
 
-      if (msg.type === "local_tool_response") {
-        const pending = pendingLocalCalls.get(msg.id);
-        if (pending) {
-          pending.resolve({ result: msg.result, exitCode: msg.exitCode });
-          pendingLocalCalls.delete(msg.id);
+      if (msg.type === "register_skill") {
+        try {
+          await registry.register(msg.skill.name, msg.skill.skillMd, ws);
+          console.log(`Skill registered: ${msg.skill.name}`);
+          broadcast({
+            type: "status",
+            agent: agentBusy ? "busy" : "idle",
+            skills: registry.getSkillNames(),
+          });
+        } catch (err) {
+          console.error(`Skill registration failed: ${err}`);
+          ws.send(
+            JSON.stringify({
+              type: "error",
+              message: `Skill registration failed: ${err instanceof Error ? err.message : String(err)}`,
+            } satisfies ServerMessage),
+          );
         }
+        return;
+      }
+
+      if (msg.type === "skill_exec_response") {
+        registry.handleExecResponse(msg.id, msg.result, msg.exitCode);
         return;
       }
 
       if (msg.type === "message") {
         if (agentBusy) {
-          sendToDesktop({
-            type: "error",
-            message: "Agent is busy processing a previous message. Please wait.",
-          });
+          ws.send(
+            JSON.stringify({
+              type: "error",
+              message:
+                "Agent is busy processing a previous message. Please wait.",
+            } satisfies ServerMessage),
+          );
           return;
         }
 
         agentBusy = true;
-        sendToDesktop({ type: "status", agent: "busy", localToolsAvailable: desktopConnected });
+        broadcast({
+          type: "status",
+          agent: "busy",
+          skills: registry.getSkillNames(),
+        });
 
         const unsubscribe = session.subscribe((event) => {
-          sendToDesktop({
+          broadcast({
             type: "agent_event",
             event: event as unknown as Record<string, unknown>,
           });
         });
 
         try {
-          console.log(`[server] Prompting agent with: "${msg.content.slice(0, 100)}"`);
+          console.log(
+            `[server] Prompting agent with: "${msg.content.slice(0, 100)}"`,
+          );
           await session.prompt(msg.content);
           console.log("[server] Agent prompt completed");
         } catch (err) {
           console.error("[server] Agent error:", err);
-          sendToDesktop({
+          broadcast({
             type: "error",
             message: `Agent error: ${err instanceof Error ? err.message : String(err)}`,
           });
         } finally {
           unsubscribe();
           agentBusy = false;
-          sendToDesktop({ type: "status", agent: "idle", localToolsAvailable: desktopConnected });
+
+          if (reloadPending) {
+            reloadPending = false;
+            await doReload();
+          }
+
+          broadcast({
+            type: "status",
+            agent: "idle",
+            skills: registry.getSkillNames(),
+          });
         }
       }
     },
