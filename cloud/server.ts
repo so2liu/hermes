@@ -200,6 +200,15 @@ Current cloud working directory: ${CWD}`;
   return result.session;
 }
 
+// --- Auth ---
+
+const AUTH_TOKEN = process.env.HERMES_AUTH_TOKEN?.trim() || undefined;
+if (!AUTH_TOKEN) {
+  console.warn(
+    "⚠ HERMES_AUTH_TOKEN not set — server is open to anyone who can reach it!",
+  );
+}
+
 // --- WebSocket server ---
 
 const PORT = parseInt(process.env.PORT ?? "8765");
@@ -211,7 +220,17 @@ console.log(`Hermes Cloud server starting on port ${PORT}...`);
 Bun.serve({
   port: PORT,
   fetch(req, server) {
-    if (server.upgrade(req)) return;
+    // Only authenticate WebSocket upgrade requests; allow health checks through
+    const isUpgrade = req.headers.get("upgrade")?.toLowerCase() === "websocket";
+    if (isUpgrade) {
+      if (AUTH_TOKEN) {
+        const url = new URL(req.url);
+        if (url.searchParams.get("token") !== AUTH_TOKEN) {
+          return new Response("Unauthorized", { status: 401 });
+        }
+      }
+      if (server.upgrade(req)) return;
+    }
     return new Response("Hermes Cloud Server", { status: 200 });
   },
   websocket: {

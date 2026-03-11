@@ -137,11 +137,16 @@ function renderEvent(event: AgentEvent): void {
 // --- WebSocket connection ---
 
 const CLOUD_URL = process.env.HERMES_CLOUD_URL ?? "ws://localhost:8765";
+const AUTH_TOKEN = process.env.HERMES_AUTH_TOKEN;
+
+const connectUrl = AUTH_TOKEN
+  ? `${CLOUD_URL}${CLOUD_URL.includes("?") ? "&" : "?"}token=${encodeURIComponent(AUTH_TOKEN)}`
+  : CLOUD_URL;
 
 console.log(`\x1b[1mHermes Desktop Client\x1b[0m`);
 console.log(`Connecting to ${CLOUD_URL}...`);
 
-const ws = new WebSocket(CLOUD_URL);
+const ws = new WebSocket(connectUrl);
 
 let agentBusy = false;
 
