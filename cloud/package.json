@@ -10,8 +10,8 @@
     "typescript": "^5"
   },
   "dependencies": {
-    "@mariozechner/pi-ai": "file:/Users/yangliu35/github/pi-mono/packages/ai",
-    "@mariozechner/pi-coding-agent": "file:/Users/yangliu35/github/pi-mono/packages/coding-agent",
+    "@mariozechner/pi-ai": "^0.57.1",
+    "@mariozechner/pi-coding-agent": "^0.57.1",
     "hono": "^4.12.7"
   }
 }

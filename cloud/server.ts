@@ -2,6 +2,7 @@ import { getModel, type Model } from "@mariozechner/pi-ai";
 import {
   createAgentSession,
   createBashTool,
+  createReadTool,
   createExtensionRuntime,
   type ResourceLoader,
   type ToolDefinition,
@@ -12,6 +13,7 @@ import {
 } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { join } from "node:path";
+import { timingSafeEqual } from "node:crypto";
 import { SkillRegistry } from "./skill-registry";
 
 // --- WebSocket protocol types ---
@@ -43,6 +45,7 @@ type ServerMessage =
 
 const CWD = process.cwd();
 const baseBashTool = createBashTool(CWD);
+const readTool = createReadTool(CWD);
 
 const cloudBashDef: ToolDefinition = {
   name: "cloud_bash",
@@ -55,8 +58,8 @@ const cloudBashDef: ToolDefinition = {
       Type.Number({ description: "Timeout in seconds" }),
     ),
   }),
-  execute: async (toolCallId, params, signal, onUpdate) => {
-    return baseBashTool.execute(toolCallId, params, signal, onUpdate);
+  execute: async (toolCallId, params, signal, onUpdate, ctx) => {
+    return baseBashTool.execute(toolCallId, params as any, signal, onUpdate);
   },
 };
 
@@ -191,7 +194,7 @@ Current cloud working directory: ${CWD}`;
     authStorage,
     modelRegistry,
     resourceLoader,
-    tools: ["read"],
+    tools: [readTool],
     customTools: registry.tools,
     sessionManager: SessionManager.inMemory(),
     settingsManager,
@@ -225,7 +228,10 @@ Bun.serve({
     if (isUpgrade) {
       if (AUTH_TOKEN) {
         const url = new URL(req.url);
-        if (url.searchParams.get("token") !== AUTH_TOKEN) {
+        const provided = url.searchParams.get("token") ?? "";
+        const a = Buffer.from(provided);
+        const b = Buffer.from(AUTH_TOKEN);
+        if (a.length !== b.length || !timingSafeEqual(a, b)) {
           return new Response("Unauthorized", { status: 401 });
         }
       }

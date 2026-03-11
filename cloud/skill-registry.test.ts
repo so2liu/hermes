@@ -214,7 +214,7 @@ describe("SkillRegistry", () => {
       label: "Cloud Bash",
       description: "cloud bash",
       parameters: {} as any,
-      execute: async () => ({ result: "", details: {} }),
+      execute: async () => ({ content: [{ type: "text" as const, text: "" }], details: {} }),
     };
     const r = new SkillRegistry({
       skillsDir: TEST_SKILLS_DIR,
@@ -264,8 +264,9 @@ describe("SkillRegistry", () => {
     registry.handleExecResponse(request.id, "hello\n", 0);
 
     const result = await promise;
-    expect(result.result).toContain("hello");
-    expect(result.result).toContain("Exit code: 0");
+    const text = result.content[0]!.type === "text" ? result.content[0]!.text : "";
+    expect(text).toContain("hello");
+    expect(text).toContain("Exit code: 0");
   });
 
   test("exec tool sends custom timeout in request", async () => {
