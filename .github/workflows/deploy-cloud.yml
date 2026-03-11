@@ -7,12 +7,38 @@ on:
       - "cloud/**"
       - ".github/workflows/deploy-cloud.yml"
 
+env:
+  IMAGE: ghcr.io/so2liu/hermes-cloud
+
 jobs:
-  deploy:
+  build-and-push:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
 
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: cloud
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ github.sha }}
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
       - name: Validate required secrets
         run: |
           missing=""
@@ -24,17 +50,7 @@ jobs:
             exit 1
           fi
 
-      - name: Copy cloud/ to server
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          source: "cloud/"
-          target: "~/hermes-cloud"
-          overwrite: true
-
-      - name: Deploy via Docker
+      - name: Deploy to server
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.DEPLOY_HOST }}
@@ -42,21 +58,24 @@ jobs:
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           script: |
             set -e
-            cd ~/hermes-cloud/cloud
+            IMAGE="${{ env.IMAGE }}:${{ github.sha }}"
 
-            # Write env file (excluded from Docker image by .dockerignore)
-            cat > .env <<EOF
-            HERMES_AUTH_TOKEN=${{ secrets.HERMES_AUTH_TOKEN }}
-            OPENROUTER_API_KEY=${{ secrets.OPENROUTER_API_KEY }}
-            ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
-            EOF
-            sed -i 's/^[[:space:]]*//' .env
+            # Pull new image
+            docker pull "$IMAGE"
 
-            # Build new image before stopping old container
-            docker compose build
+            # Stop old containers (including legacy docker compose name)
+            docker rm -f hermes-cloud cloud-hermes-cloud-1 2>/dev/null || true
 
-            # Swap containers
-            docker compose up -d
+            # Start new container
+            docker run -d \
+              --name hermes-cloud \
+              --restart unless-stopped \
+              -p 8765:8765 \
+              -v hermes-data:/app/.hermes \
+              -e PORT=8765 \
+              -e HERMES_AUTH_TOKEN="${{ secrets.HERMES_AUTH_TOKEN }}" \
+              -e OPENROUTER_API_KEY="${{ secrets.OPENROUTER_API_KEY }}" \
+              "$IMAGE"
 
             # Verify health
             sleep 3
@@ -64,6 +83,8 @@ jobs:
               echo "Hermes Cloud Server is running"
             else
               echo "Health check failed"
-              docker compose logs --tail=50
+              docker logs hermes-cloud --tail=50
               exit 1
             fi
+        env:
+          IMAGE: ghcr.io/so2liu/hermes-cloud
