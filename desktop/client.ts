@@ -5,20 +5,55 @@ import * as readline from "node:readline";
 
 type ServerMessage =
   | { type: "agent_event"; event: AgentEvent }
-  | { type: "local_tool_request"; id: string; tool: string; params: { command: string; timeout?: number } }
+  | {
+      type: "skill_exec_request";
+      id: string;
+      sessionId: string;
+      skillName: string;
+      command: string;
+      timeout?: number;
+    }
   | { type: "error"; message: string }
-  | { type: "status"; agent: "idle" | "busy"; localToolsAvailable: boolean };
+  | { type: "status"; agent: "idle" | "busy"; skills: string[] };
 
 type AgentEvent = {
   type: string;
   [key: string]: unknown;
 };
 
+// --- Desktop SKILL.md content ---
+
+const DESKTOP_SKILL_MD = `---
+name: desktop
+description: "操作用户本地电脑。访问本地文件、使用本地应用、操作浏览器登录状态等。"
+---
+
+# Desktop 本地执行环境
+
+通过 \`desktop_exec\` 工具在用户本地电脑上执行 bash 命令。
+
+## 使用方法
+
+\`\`\`
+desktop_exec({ command: "ls ~/Desktop" })
+\`\`\`
+
+## 适用场景
+- 访问用户本地文件（~/Desktop、~/Documents 等）
+- 使用用户本地安装的应用
+- 操作浏览器登录状态
+- 其他需要用户本地环境的操作
+
+## 注意事项
+- 命令在用户的 home 目录下执行
+- 超时默认 120 秒
+`;
+
 // --- Local tool execution ---
 
 async function executeLocalBash(
   command: string,
-  timeout?: number
+  timeout?: number,
 ): Promise<{ result: string; exitCode: number | null }> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
@@ -59,7 +94,9 @@ async function executeLocalBash(
 function renderEvent(event: AgentEvent): void {
   switch (event.type) {
     case "message_update": {
-      const ae = event.assistantMessageEvent as Record<string, unknown> | undefined;
+      const ae = event.assistantMessageEvent as
+        | Record<string, unknown>
+        | undefined;
       if (ae?.type === "text_delta" && typeof ae.delta === "string") {
         process.stdout.write(ae.delta);
       }
@@ -78,11 +115,12 @@ function renderEvent(event: AgentEvent): void {
       const result = (event as any).result;
       if (result?.result) {
         const output = String(result.result);
-        // Truncate long outputs
         const lines = output.split("\n");
         if (lines.length > 20) {
           console.log(lines.slice(0, 10).join("\n"));
-          console.log(`\x1b[90m... (${lines.length - 20} lines omitted) ...\x1b[0m`);
+          console.log(
+            `\x1b[90m... (${lines.length - 20} lines omitted) ...\x1b[0m`,
+          );
           console.log(lines.slice(-10).join("\n"));
         } else {
           console.log(output);
@@ -109,6 +147,15 @@ let agentBusy = false;
 
 ws.addEventListener("open", () => {
   console.log("Connected to Hermes Cloud");
+
+  // Register as desktop skill
+  ws.send(
+    JSON.stringify({
+      type: "register_skill",
+      skill: { name: "desktop", skillMd: DESKTOP_SKILL_MD },
+    }),
+  );
+  console.log("Registered desktop skill");
   console.log('Type your message and press Enter. Type "exit" to quit.\n');
   promptUser();
 });
@@ -125,7 +172,9 @@ ws.addEventListener("error", (event) => {
 
 ws.addEventListener("message", async (event) => {
   const msg: ServerMessage = JSON.parse(
-    typeof event.data === "string" ? event.data : new TextDecoder().decode(event.data as ArrayBuffer)
+    typeof event.data === "string"
+      ? event.data
+      : new TextDecoder().decode(event.data as ArrayBuffer),
   );
 
   switch (msg.type) {
@@ -133,29 +182,29 @@ ws.addEventListener("message", async (event) => {
       renderEvent(msg.event);
       break;
 
-    case "local_tool_request": {
-      console.log(`\n\x1b[33m[local execution requested]\x1b[0m`);
+    case "skill_exec_request": {
+      console.log(`\n\x1b[33m[local execution: ${msg.skillName}]\x1b[0m`);
       try {
         const { result, exitCode } = await executeLocalBash(
-          msg.params.command,
-          msg.params.timeout
+          msg.command,
+          msg.timeout,
         );
         ws.send(
           JSON.stringify({
-            type: "local_tool_response",
+            type: "skill_exec_response",
             id: msg.id,
             result,
             exitCode,
-          })
+          }),
         );
       } catch (err) {
         ws.send(
           JSON.stringify({
-            type: "local_tool_response",
+            type: "skill_exec_response",
             id: msg.id,
             result: `Error: ${err instanceof Error ? err.message : String(err)}`,
             exitCode: 1,
-          })
+          }),
         );
       }
       break;
