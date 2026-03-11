@@ -221,6 +221,7 @@ session = await createHermesAgent();
 console.log(`Hermes Cloud server starting on port ${PORT}...`);
 
 Bun.serve({
+  hostname: "0.0.0.0",
   port: PORT,
   fetch(req, server) {
     // Only authenticate WebSocket upgrade requests; allow health checks through
