@@ -1,0 +1,5 @@
+node_modules/
+.hermes/
+.context/
+*.log
+.env

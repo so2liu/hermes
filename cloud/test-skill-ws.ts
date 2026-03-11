@@ -89,9 +89,10 @@ const server = Bun.serve({
 
             resultPromise
               .then((result) => {
-                log(`server: exec result: ${result.result.trim()}`);
+                const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+                log(`server: exec result: ${text.trim()}`);
 
-                if (result.result.includes("skill-test-ok")) {
+                if (text.includes("skill-test-ok")) {
                   log("PASS: skill exec round-trip works");
                 } else {
                   log(`FAIL: unexpected exec result`);

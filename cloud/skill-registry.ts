@@ -185,7 +185,7 @@ export class SkillRegistry {
           Type.Number({ description: "Timeout in seconds" }),
         ),
       }),
-      async execute(toolCallId, params, signal) {
+      async execute(toolCallId, params, signal, onUpdate, ctx) {
         const { command, timeout: userTimeout } = params as {
           command: string;
           timeout?: number;
@@ -193,7 +193,7 @@ export class SkillRegistry {
         const ws = registry.wsBySkill.get(skillName);
         if (!ws) {
           return {
-            result: `Error: ${skillName} environment is not connected.`,
+            content: [{ type: "text" as const, text: `Error: ${skillName} environment is not connected.` }],
             details: {},
           };
         }
@@ -246,7 +246,7 @@ export class SkillRegistry {
         });
 
         return {
-          result: `Exit code: ${response.exitCode}\n${response.result}`,
+          content: [{ type: "text" as const, text: `Exit code: ${response.exitCode}\n${response.result}` }],
           details: {},
         };
       },
